@@ -239,7 +239,15 @@ def _semantic_evidence(
         persistence_call = bool(_PERSISTENCE_CALL.search(semantic_text))
         sql_operation = bool(_SQL_OPERATION.search(semantic_text))
         persistence_hint = bool(_PERSISTENCE_HINT.search(semantic_text))
+        test_evidence = _is_test_code(default_path, stripped)
         if persistence_call or sql_operation or persistence_hint:
+            is_strong_p = persistence_call or sql_operation
+            strength_p, can_satisfy_p = _maybe_downgrade_for_test(
+                strength="strong" if is_strong_p else "weak",
+                can_satisfy=is_strong_p,
+                file_path=default_path,
+                text=stripped,
+            )
             items.append(
                 _evidence(
                     claim=f"Persistence evidence: {stripped}",
@@ -248,8 +256,8 @@ def _semantic_evidence(
                     file_path=default_path,
                     symbol=located_symbol,
                     tool_name=tool_name,
-                    strength=("strong" if persistence_call or sql_operation else "weak"),
-                    can_satisfy_stage_field=persistence_call or sql_operation,
+                    strength=strength_p,
+                    can_satisfy_stage_field=can_satisfy_p,
                     reason=(
                         "Matched an actual repository/DAO/Mapper read-write call or SQL operation."
                         if persistence_call or sql_operation
@@ -273,6 +281,12 @@ def _semantic_evidence(
             )
         if _EVENT.search(stripped):
             is_strong_event = bool(_STRONG_EVENT.search(stripped))
+            strength_ev, can_satisfy_ev = _maybe_downgrade_for_test(
+                strength="strong" if is_strong_event else "weak",
+                can_satisfy=is_strong_event,
+                file_path=default_path,
+                text=stripped,
+            )
             items.append(
                 _evidence(
                     claim=f"Event publish/listener evidence: {stripped}",
@@ -281,8 +295,8 @@ def _semantic_evidence(
                     file_path=default_path,
                     symbol=located_symbol,
                     tool_name=tool_name,
-                    strength=("strong" if is_strong_event else "weak"),
-                    can_satisfy_stage_field=is_strong_event,
+                    strength=strength_ev,
+                    can_satisfy_stage_field=can_satisfy_ev,
                     reason=(
                         "Matched an explicit event publish/listener/consumer operation."
                         if is_strong_event
@@ -301,6 +315,12 @@ def _semantic_evidence(
             is_strong_status = bool(_STATUS_WRITE.search(stripped)) or (
                 bool(status_enum) and ("->" in stripped or "→" in stripped)
             )
+            strength_st, can_satisfy_st = _maybe_downgrade_for_test(
+                strength="strong" if is_strong_status else "weak",
+                can_satisfy=is_strong_status,
+                file_path=default_path,
+                text=stripped,
+            )
             items.append(
                 _evidence(
                     claim=f"Status/state evidence: {stripped}",
@@ -309,8 +329,8 @@ def _semantic_evidence(
                     file_path=default_path,
                     symbol=located_symbol,
                     tool_name=tool_name,
-                    strength=("strong" if is_strong_status else "weak"),
-                    can_satisfy_stage_field=is_strong_status,
+                    strength=strength_st,
+                    can_satisfy_stage_field=can_satisfy_st,
                     reason=(
                         "Matched an explicit status/state write or transition."
                         if is_strong_status
@@ -344,6 +364,14 @@ def _call_edge(
 ) -> Evidence:
     symbol = f"{source} -> {destination}"
     generic_node = _generic_edge_node(source) or _generic_edge_node(destination)
+    base_strength = "noise" if generic_node else "strong"
+    base_can_satisfy = not generic_node
+    strength, can_satisfy = _maybe_downgrade_for_test(
+        strength=base_strength,
+        can_satisfy=base_can_satisfy,
+        file_path=file_path,
+        text=symbol,
+    )
     return _evidence(
         claim=f"{source} calls {destination}",
         source_type="call_edge",
@@ -351,8 +379,8 @@ def _call_edge(
         file_path=file_path,
         symbol=symbol,
         tool_name=tool_name,
-        strength=("noise" if generic_node else "strong"),
-        can_satisfy_stage_edge=not generic_node,
+        strength=strength,
+        can_satisfy_stage_edge=can_satisfy,
         reason=(
             "A generic wrapper, context, mapping, or transport node cannot satisfy a business-stage edge."
             if generic_node
@@ -409,6 +437,50 @@ def _noise_reason(text: str) -> str | None:
 
 def _generic_edge_node(symbol: str) -> bool:
     return bool(_GENERIC_SYMBOL.search(symbol))
+
+
+def _is_test_code(file_path: str | None, text: str) -> bool:
+    """Return True if the evidence likely comes from test code."""
+
+    if file_path:
+        fp = file_path.casefold()
+        if "/src/test/" in fp or "/test/" in fp:
+            return True
+        # Check if filename contains "test" (e.g., WidgetJobTest.java, test_service.py)
+        parts = fp.replace("\\", "/").split("/")
+        filename = parts[-1].split(":")[0]  # strip line number
+        if "test" in filename and "." in filename:
+            return True
+
+    # Check test-related keywords in text content.
+    if not text:
+        return False
+    text_lower = text.casefold()
+    test_markers = ("should_", "when_", "then_", "mockito", "assertthat", "assertequals")
+    if any(marker in text_lower for marker in test_markers):
+        return True
+    if "when(" in text_lower and ("thenreturn" in text_lower or "thenReturn" in text):
+        return True
+    if "verify(" in text_lower:
+        return True
+
+    return False
+
+
+def _maybe_downgrade_for_test(
+    *,
+    strength: str,
+    can_satisfy: bool,
+    file_path: str | None,
+    text: str,
+) -> tuple[str, bool]:
+    """Downgrade to weak if the evidence comes from test code."""
+
+    if strength != "strong":
+        return strength, can_satisfy
+    if _is_test_code(file_path, text):
+        return "weak", False
+    return strength, can_satisfy
 
 
 def _deduplicate(items: list[Evidence]) -> list[Evidence]:

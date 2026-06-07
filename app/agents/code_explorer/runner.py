@@ -11,7 +11,7 @@ from typing import Sequence
 
 from app.agents.code_explorer.agent import CodeExplorerAgent
 from app.core.config import Settings
-from app.core.llm_client import LLMClient
+from app.core.llm_client import create_llm_client
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,13 +24,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="CodeGraph-indexed repository path; defaults to CODEGRAPH_PROJECT_PATH or cwd",
     )
+    parser.add_argument(
+        "--mock-llm-responses",
+        type=Path,
+        help="Replay local JSONL Chat Completions responses instead of calling a real LLM",
+    )
     return parser
 
 
 async def run_agent(task: str, settings: Settings) -> int:
     """Run one CLI task and print its artifact paths."""
 
-    llm_client = LLMClient(settings)
+    llm_client = create_llm_client(settings)
     agent = CodeExplorerAgent(settings, llm_client)
     try:
         result = await agent.run(task)
@@ -55,6 +60,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = replace(
             settings,
             codegraph_project_path=args.project_path.expanduser().resolve(),
+        )
+    if args.mock_llm_responses is not None:
+        settings = replace(
+            settings,
+            mock_llm_responses_file=args.mock_llm_responses.expanduser().resolve(),
         )
     return asyncio.run(run_agent(args.task, settings))
 

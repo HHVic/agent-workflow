@@ -182,3 +182,64 @@ def test_tool_log_response_preserves_multiline_mcp_text_for_extraction() -> None
         and item.symbol == "WidgetJob.doExecute -> WidgetService.calculate"
         for item in state.evidence_items
     )
+
+
+def test_business_stage_default_stage_type() -> None:
+    stage = BusinessStage(name="test stage")
+    assert stage.stage_type == "unknown"
+
+
+def test_business_stage_default_is_mainline() -> None:
+    stage = BusinessStage(name="test stage")
+    assert stage.is_mainline is False
+
+
+def test_business_stage_default_is_optional() -> None:
+    stage = BusinessStage(name="test stage")
+    assert stage.is_optional is False
+
+
+def test_business_stage_default_capabilities() -> None:
+    stage = BusinessStage(name="test stage")
+    assert stage.capabilities == []
+
+
+def test_business_stage_default_required_fields() -> None:
+    stage = BusinessStage(name="test stage")
+    assert stage.required_fields == []
+
+
+def test_business_stage_from_dict_backward_compat() -> None:
+    old_format = {
+        "name": "收入明细计算",
+        "description": "计算收入明细",
+        "confidence": "inferred",
+        "evidence": [],
+        "open_questions": [],
+        "optional": False,
+    }
+    stage = BusinessStage.from_dict(old_format)
+    assert stage.name == "收入明细计算"
+    assert stage.stage_type == "unknown"
+    assert stage.is_mainline is False
+    assert stage.is_optional is False
+    assert stage.capabilities == []
+    assert stage.required_fields == []
+
+
+def test_business_stage_from_dict_with_new_fields() -> None:
+    full_format = {
+        "name": "结算单创建",
+        "stage_type": "settlement",
+        "is_mainline": True,
+        "is_optional": False,
+        "capabilities": ["create", "validate"],
+        "required_fields": ["trigger", "output"],
+        "confidence": "confirmed",
+    }
+    stage = BusinessStage.from_dict(full_format)
+    assert stage.stage_type == "settlement"
+    assert stage.is_mainline is True
+    assert stage.is_optional is False
+    assert stage.capabilities == ["create", "validate"]
+    assert stage.required_fields == ["trigger", "output"]

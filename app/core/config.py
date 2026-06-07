@@ -26,6 +26,8 @@ class Settings:
     max_seconds: int
     runs_dir: Path
     max_continuations: int = 3
+    fail_on_incomplete: bool = False
+    mock_llm_responses_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -49,6 +51,12 @@ class Settings:
             max_continuations=_read_positive_int(
                 "CODE_EXPLORER_MAX_CONTINUATIONS", 3
             ),
+            fail_on_incomplete=_read_bool(
+                "CODE_EXPLORER_FAIL_ON_INCOMPLETE", False
+            ),
+            mock_llm_responses_file=_read_optional_path(
+                "CODE_EXPLORER_MOCK_LLM_RESPONSES_FILE"
+            ),
         )
 
 
@@ -58,3 +66,22 @@ def _read_positive_int(name: str, default: int) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _read_optional_path(name: str) -> Path | None:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    return Path(raw_value).expanduser()

@@ -16,6 +16,8 @@ def test_settings_load_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         "CODE_EXPLORER_MAX_TOOL_CALLS",
         "CODE_EXPLORER_MAX_SECONDS",
         "CODE_EXPLORER_MAX_CONTINUATIONS",
+        "CODE_EXPLORER_FAIL_ON_INCOMPLETE",
+        "CODE_EXPLORER_MOCK_LLM_RESPONSES_FILE",
         "RUNS_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -32,6 +34,8 @@ def test_settings_load_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert settings.max_tool_calls == 120
     assert settings.max_seconds == 900
     assert settings.max_continuations == 3
+    assert settings.fail_on_incomplete is False
+    assert settings.mock_llm_responses_file is None
     assert settings.runs_dir == Path("runs")
 
 
@@ -48,6 +52,11 @@ def test_settings_load_environment_overrides(
     monkeypatch.setenv("CODE_EXPLORER_MAX_TOOL_CALLS", "42")
     monkeypatch.setenv("CODE_EXPLORER_MAX_SECONDS", "75")
     monkeypatch.setenv("CODE_EXPLORER_MAX_CONTINUATIONS", "5")
+    monkeypatch.setenv("CODE_EXPLORER_FAIL_ON_INCOMPLETE", "true")
+    monkeypatch.setenv(
+        "CODE_EXPLORER_MOCK_LLM_RESPONSES_FILE",
+        "~/fixtures/mock-llm.jsonl",
+    )
     monkeypatch.setenv("RUNS_DIR", str(tmp_path / "logs"))
 
     settings = Settings.from_env()
@@ -66,6 +75,8 @@ def test_settings_load_environment_overrides(
     assert settings.max_tool_calls == 42
     assert settings.max_seconds == 75
     assert settings.max_continuations == 5
+    assert settings.fail_on_incomplete is True
+    assert settings.mock_llm_responses_file == Path("~/fixtures/mock-llm.jsonl").expanduser()
     assert settings.runs_dir == tmp_path / "logs"
 
 

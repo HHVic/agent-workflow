@@ -14,14 +14,18 @@ from typing import Any
 from openai.types.chat import ChatCompletionMessage
 
 from app.agents.code_explorer.continuation import (
+    _filter_candidates,
     build_anti_stagnation_prompt,
     build_continuation_prompt,
     build_convergence_checkpoint_prompt,
     build_stagnation_report_prompt,
 )
 from app.agents.code_explorer.exploration_state import (
+    BusinessStage,
     ExplorationState,
+    StopDecision,
     can_satisfy_stage_edge,
+    is_strong_evidence,
     update_state_from_candidate_report,
     update_state_from_tool_logs,
 )
@@ -44,7 +48,7 @@ from app.agents.code_explorer.tools import (
     ToolArgumentValidationError,
 )
 from app.core.config import Settings
-from app.core.llm_client import LLMClient
+from app.core.llm_client import ChatCompletionClient
 from app.mcp.codegraph_mcp_client import CodeGraphMCPClient
 from app.storage.run_store import RunArtifacts, RunStore
 
@@ -96,7 +100,7 @@ class CodeExplorerAgent:
     def __init__(
         self,
         settings: Settings,
-        llm_client: LLMClient,
+        llm_client: ChatCompletionClient,
         *,
         memory: ConversationMemory | None = None,
         run_store: RunStore | None = None,
@@ -235,9 +239,19 @@ class CodeExplorerAgent:
                         self._save_exploration_artifacts(artifacts, state)
                         continue
                     if not decision.can_stop:
-                        raise ExplorationLimitError(
-                            "feature exploration remained incomplete after "
-                            "CODE_EXPLORER_MAX_CONTINUATIONS safety fuse reached"
+                        incomplete_reason = (
+                            "CODE_EXPLORER_MAX_CONTINUATIONS safety fuse reached "
+                            "before Evidence Gate passed"
+                        )
+                        if self._settings.fail_on_incomplete:
+                            raise ExplorationLimitError(
+                                "feature exploration remained incomplete after "
+                                "CODE_EXPLORER_MAX_CONTINUATIONS safety fuse reached"
+                            )
+                        return _build_incomplete_report(
+                            state,
+                            incomplete_reason,
+                            tool_count,
                         )
                 quality_report = artifacts.path(
                     "evidence_quality_report.md"
@@ -577,25 +591,79 @@ def _build_recovery_report(
 ) -> str:
     """Render a local summary without pretending an interrupted run completed."""
 
+    return _build_local_state_report(
+        state,
+        title=(
+            "# 代码探索结果（本地恢复摘要）"
+            if (state.stop_decision or judge_stop(state, "")).can_stop
+            else "# 代码探索结果（未完成）"
+        ),
+        introduction=(
+            "> 最终 LLM 汇总未能完成。以下内容根据已保存的本地探索状态生成，"
+            "不是完整最终结论。"
+        ),
+        termination_reason=f"{type(failure).__name__}: {failure}",
+        tool_count=None,
+    )
+
+
+def _build_incomplete_report(
+    state: ExplorationState,
+    termination_reason: str,
+    tool_count: int,
+) -> str:
+    """Render a usable phase report while preserving CAN_STOP=no."""
+
+    return _build_local_state_report(
+        state,
+        title="# 代码探索结果（阶段性）",
+        introduction=(
+            "> 本报告为当前静态探索下的阶段性结论，Evidence Gate 未完全通过。"
+            "以下结论只代表已确认 strong evidence 能支撑的部分，未闭合链路已单独列出。"
+        ),
+        termination_reason=termination_reason,
+        tool_count=tool_count,
+    )
+
+
+def _build_local_state_report(
+    state: ExplorationState,
+    *,
+    title: str,
+    introduction: str,
+    termination_reason: str,
+    tool_count: int | None,
+) -> str:
+    """Render one truthful local report from persisted exploration state."""
+
     decision = state.stop_decision or judge_stop(state, "")
     gate_status = "passed" if decision.can_stop else "not passed"
-    title = (
-        "# 代码探索结果（本地恢复摘要）"
-        if decision.can_stop
-        else "# 代码探索结果（未完成）"
-    )
+    prioritized, _ = _filter_candidates(state)
     lines = [
         title,
         "",
-        "> 最终 LLM 汇总未能完成。以下内容根据已保存的本地探索状态生成，不是完整最终结论。",
+        introduction,
         "",
         "## 运行状态",
-        f"- 终止原因：{type(failure).__name__}: {failure}",
-        f"- Evidence quality gate：{gate_status}",
+        f"- 终止原因：{termination_reason}",
+        f"- Evidence Gate: {gate_status}",
+        f"- continuation count: {state.continuation_count}",
+        f"- tool call count: {tool_count if tool_count is not None else 'unknown'}",
+        "",
+        "## 已确认主线事实",
+        *_markdown_items(
+            _deduplicate_strings(
+                [
+                    fact.claim
+                    for fact in state.confirmed_facts
+                    if is_strong_evidence(fact)
+                ]
+            )
+        ),
         "",
         "## 已识别业务阶段",
         *_markdown_items(
-            [f"{stage.name} ({stage.confidence})" for stage in state.stages]
+            [f"{stage.name} ({_stage_report_status(stage)})" for stage in state.stages]
         ),
         "",
         "## 已确认阶段连接",
@@ -608,14 +676,35 @@ def _build_recovery_report(
             ]
         ),
         "",
-        "## 阻塞项",
+        "## 未闭合的关键断点",
+        "### Blocking Gaps",
         *_markdown_items(decision.blocking_gaps),
+        "",
+        "### Missing Stage Fields",
+        *_markdown_items(
+            [
+                f"{stage}: {', '.join(fields)}"
+                for stage, fields in decision.missing_stage_fields.items()
+            ]
+        ),
+        "",
+        "### Missing Edges",
+        *_markdown_items(decision.missing_edges),
+        "",
+        "### Evidence Problems",
+        *_markdown_items(decision.evidence_problems),
         "",
         "## 不确定项",
         *_markdown_items(state.unknowns + state.open_questions),
         "",
+        "## 下一步最有价值探索方向",
+        *_markdown_items(prioritized),
+        "",
         "## 说明",
         "- 本报告不包含源码正文。",
+        "- StopDecision 保持 CAN_STOP=no，阶段性报告不代表 Evidence Gate 已通过。"
+        if not decision.can_stop
+        else "- Evidence Gate 已通过。",
         "- 完整证据、阶段图和消息记录请查看同目录本地产物。",
     ]
     return "\n".join(lines) + "\n"
@@ -623,6 +712,20 @@ def _build_recovery_report(
 
 def _markdown_items(items: list[str]) -> list[str]:
     return [f"- {item}" for item in items] if items else ["- None"]
+
+
+def _stage_report_status(stage: BusinessStage) -> str:
+    if stage.optional:
+        return "optional"
+    if stage.confidence in {"confirmed", "inferred", "supporting", "unknown"}:
+        return stage.confidence
+    if any(is_strong_evidence(evidence) for evidence in stage.evidence):
+        return "supporting"
+    return "unknown"
+
+
+def _deduplicate_strings(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
 
 
 def guard_final_report(report: str, evidence_quality_report: str) -> str:

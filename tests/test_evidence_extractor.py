@@ -1,3 +1,6 @@
+"""Tests for evidence_extractor, including test-code downgrade rules."""
+
+from app.agents.code_explorer.exploration_state import Evidence
 from app.agents.code_explorer.evidence_extractor import extract_evidence_from_tool_result
 
 
@@ -134,3 +137,159 @@ def test_does_not_create_business_evidence_from_generic_tool_success_text() -> N
     )
 
     assert not evidence
+
+
+# -- Test-code downgrade rules --
+
+
+def test_src_test_file_path_evidence_is_weak() -> None:
+    """Test evidence from /src/test/ paths is downgraded to weak."""
+    evidence = extract_evidence_from_tool_result(
+        "find_callers",
+        {"symbol": "WidgetService.calculate"},
+        """\
+## Callers of WidgetService.calculate (1 found)
+
+- WidgetJob.doExecute (method) - src/main/java/example/test/WidgetJob.java:22
+""",
+    )
+
+    edge = next((e for e in evidence if e.source_type == "call_edge"), None)
+    assert edge is not None
+    assert edge.strength == "weak"
+    assert edge.can_satisfy_stage_edge is False
+
+
+def test_test_java_file_is_weak() -> None:
+    """Test evidence from Test.java files is downgraded to weak."""
+    evidence = extract_evidence_from_tool_result(
+        "find_callers",
+        {"symbol": "WidgetService.calculate"},
+        """\
+## Callers of WidgetService.calculate (1 found)
+
+- WidgetJob.doExecute (method) - src/main/java/example/WidgetJobTest.java:22
+""",
+    )
+
+    edge = next((e for e in evidence if e.source_type == "call_edge"), None)
+    assert edge is not None
+    assert edge.strength == "weak"
+    assert edge.can_satisfy_stage_edge is False
+
+
+def test_should_call_edge_is_weak() -> None:
+    """Call edges from test method names (should_*) are downgraded to weak."""
+    evidence = extract_evidence_from_tool_result(
+        "trace_path",
+        {"from": "should_createUser", "to": "UserService.createUser"},
+        "should_createUser -> UserService.createUser",
+    )
+
+    edge = next((e for e in evidence if e.source_type == "call_edge"), None)
+    assert edge is not None
+    assert edge.strength == "weak"
+    assert edge.can_satisfy_stage_edge is False
+
+
+def test_when_then_return_mockito_stub_is_weak() -> None:
+    """Mockito stub when(...).thenReturn is detected as test code and downgraded."""
+    evidence = extract_evidence_from_tool_result(
+        "explore_symbol",
+        {"query": "widget flow"},
+        "when(xxxDao.selectByExample(any())).thenReturn(mockResult)",
+    )
+
+    repo = next((e for e in evidence if e.source_type == "repository"), None)
+    assert repo is not None
+    assert repo.strength == "weak"
+    assert repo.can_satisfy_stage_field is False
+
+
+def test_verify_keyword_in_evidence_is_weak() -> None:
+    """Evidence containing verify() is detected as test code and downgraded."""
+    evidence = extract_evidence_from_tool_result(
+        "explore_symbol",
+        {"query": "widget flow"},
+        "verify(mockService).doSomething()",
+    )
+
+    semantic_items = [
+        e for e in evidence if e.source_type in ("repository", "event", "status", "call_edge")
+    ]
+    for item in semantic_items:
+        assert item.strength == "weak"
+        assert item.can_satisfy_stage_field is False
+        assert item.can_satisfy_stage_edge is False
+
+
+def test_prod_repository_update_is_strong() -> None:
+    """Production repository.update remains strong."""
+    evidence = extract_evidence_from_tool_result(
+        "explore_symbol",
+        {"query": "widget flow"},
+        """\
+## WidgetRepository.update (method)
+**Location:** src/main/java/example/WidgetRepository.java:31
+update Widget record in widget_record table
+""",
+    )
+
+    repo = next((e for e in evidence if e.source_type == "repository"), None)
+    assert repo is not None
+    assert repo.strength == "strong"
+    assert repo.can_satisfy_stage_field is True
+
+
+def test_prod_only_update_status_is_strong() -> None:
+    """Production onlyUpdateSettlementStatus remains strong."""
+    evidence = extract_evidence_from_tool_result(
+        "explore_symbol",
+        {"query": "widget flow"},
+        """\
+## SettlementService.onlyUpdateSettlementStatus (method)
+**Location:** src/main/java/example/SettlementService.java:45
+onlyUpdateSettlementStatus(id, NEW_STATUS)
+""",
+    )
+
+    status = next((e for e in evidence if e.source_type == "status"), None)
+    assert status is not None
+    assert status.strength == "strong"
+    assert status.can_satisfy_stage_field is True
+
+
+def test_prod_publish_event_is_strong() -> None:
+    """Production publishEvent remains strong."""
+    evidence = extract_evidence_from_tool_result(
+        "explore_symbol",
+        {"query": "widget flow"},
+        """\
+## WidgetService.publishEvent (method)
+**Location:** src/main/java/example/WidgetService.java:50
+WidgetEvent published by publishEvent
+""",
+    )
+
+    event = next((e for e in evidence if e.source_type == "event"), None)
+    assert event is not None
+    assert event.strength == "strong"
+    assert event.can_satisfy_stage_field is True
+
+
+def test_prod_call_edge_is_strong() -> None:
+    """Production call edges remain strong."""
+    evidence = extract_evidence_from_tool_result(
+        "find_callers",
+        {"symbol": "WidgetService.calculate"},
+        """\
+## Callers of WidgetService.calculate (1 found)
+
+- WidgetJob.doExecute (method) - src/main/java/example/WidgetJob.java:22
+""",
+    )
+
+    edge = next((e for e in evidence if e.source_type == "call_edge"), None)
+    assert edge is not None
+    assert edge.strength == "strong"
+    assert edge.can_satisfy_stage_edge is True

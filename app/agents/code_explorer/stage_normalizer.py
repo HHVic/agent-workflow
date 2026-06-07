@@ -21,7 +21,19 @@ _CATEGORY_MARKERS = (
     ("可持久化数据读取", ("query", "find", "load", "select", "fetch", "getby")),
     ("业务计算与转换", ("calculate", "compute", "match", "assemble", "convert", "transform", "process", "handle")),
     ("入口触发", ("controller", "delegate", "grpc", "rpc", "job", "listener", "execute", "trigger")),
+    ("定时任务触发", ("scheduled", "cron", "scheduler", "timer")),
 )
+
+_SUPPORTING_STAGE_CAPABILITIES = {
+    "持久化写入": ["has_persistence_write"],
+    "可持久化数据读取": ["has_persistence_read"],
+    "状态流转": ["has_state_change"],
+    "事件发布与消费": ["has_event_publish", "has_event_consume"],
+    "入口触发": ["has_trigger"],
+    "定时任务触发": ["has_trigger"],
+    "业务计算与转换": ["has_transform"],
+}
+
 _SOURCE_STAGE_NAMES = {
     "repository": "持久化写入",
     "table": "持久化写入",
@@ -54,14 +66,16 @@ def normalize_stage_candidates(
         if stage_name.startswith("待确认阶段："):
             fallback = fallback or (stage_name, evidence)
             continue
-        stage = stages.setdefault(
-            stage_name,
-            BusinessStage(
-                name=stage_name,
-                description="Normalized from located CodeGraph tool evidence.",
-                confidence=("unknown" if stage_name.startswith("待确认阶段：") else "confirmed"),
-            ),
-        )
+        stage_kwargs: dict = {
+            "name": stage_name,
+            "description": "Normalized from located CodeGraph tool evidence.",
+            "confidence": "unknown" if stage_name.startswith("待确认阶段：") else "confirmed",
+        }
+        if stage_name in _SUPPORTING_STAGE_CAPABILITIES:
+            stage_kwargs["stage_type"] = "supporting"
+            stage_kwargs["is_mainline"] = False
+            stage_kwargs["capabilities"] = _SUPPORTING_STAGE_CAPABILITIES[stage_name]
+        stage = stages.setdefault(stage_name, BusinessStage(**stage_kwargs))
         _attach_evidence(stage, evidence)
     if not stages and fallback:
         stage_name, evidence = fallback
@@ -152,6 +166,11 @@ def merge_normalized_stages(
         if current.confidence != "confirmed" and candidate.confidence == "confirmed":
             current.confidence = "confirmed"
             current.optional = False
+        if candidate.stage_type == "supporting" and current.stage_type != "supporting":
+            current.stage_type = "supporting"
+            current.is_mainline = False
+            if candidate.capabilities:
+                current.capabilities = list(candidate.capabilities)
         for evidence in candidate.evidence:
             _attach_evidence(current, evidence)
     return list(merged.values())

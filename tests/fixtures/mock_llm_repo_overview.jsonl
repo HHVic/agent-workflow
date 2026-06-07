@@ -1,0 +1,2 @@
+{"tool_calls":[{"id":"mock-call-1","name":"check_code_index","arguments":{}}]}
+{"content":"# 代码探索结果\n\n## 索引状态\n已通过 check_code_index 获取索引状态。\n\n## 顶层仓库结构\n这是 mock 回放报告；请结合真实 CodeGraph 工具日志检查顶层结构。\n\n## 主要模块职责\nmock 模式未预置模块职责。\n\n## 关键启动入口\nmock 模式未预置启动入口。\n\n## 主要业务域\nmock 模式未预置业务域。\n\n## 建议进一步探索方向\n使用真实模型时继续探索目标模块。\n\n## 不确定项\n本报告仅用于验证本地 Agent 循环和 MCP 工具调用，不代表真实仓库分析结论。"}

@@ -392,7 +392,7 @@ def test_feature_exploration_does_not_save_unclosed_candidate_report(
     llm_client = FakeContinuingLLMClient()
 
     agent = CodeExplorerAgent(
-        _settings(tmp_path, max_continuations=1),
+        _settings(tmp_path, max_continuations=1, fail_on_incomplete=True),
         llm_client,
     )
     with pytest.raises(ExplorationLimitError, match="remained incomplete"):
@@ -427,7 +427,12 @@ def test_feature_exploration_adds_one_convergence_checkpoint_near_tool_limit(
     llm_client = FakeConvergenceCheckpointLLMClient()
 
     agent = CodeExplorerAgent(
-        _settings(tmp_path, max_continuations=1, max_tool_calls=4),
+        _settings(
+            tmp_path,
+            max_continuations=1,
+            max_tool_calls=4,
+            fail_on_incomplete=True,
+        ),
         llm_client,
     )
     with pytest.raises(ExplorationLimitError, match="remained incomplete"):
@@ -449,7 +454,7 @@ def test_feature_exploration_keeps_tools_after_repeated_stagnation_when_unclosed
     llm_client = FakeStagnatingLLMClient()
 
     agent = CodeExplorerAgent(
-        _settings(tmp_path, max_continuations=1),
+        _settings(tmp_path, max_continuations=1, fail_on_incomplete=True),
         llm_client,
     )
     with pytest.raises(ExplorationLimitError, match="remained incomplete"):
@@ -477,6 +482,7 @@ def _settings(
     *,
     max_continuations: int = 3,
     max_tool_calls: int = 120,
+    fail_on_incomplete: bool = False,
 ) -> Settings:
     return Settings(
         llm_api_key="test-key",
@@ -489,6 +495,7 @@ def _settings(
         max_seconds=900,
         runs_dir=tmp_path / "runs",
         max_continuations=max_continuations,
+        fail_on_incomplete=fail_on_incomplete,
     )
 
 

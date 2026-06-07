@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclasses_fields
 from typing import Any, Literal
 
 _CANDIDATE_SYMBOL = re.compile(
@@ -51,6 +51,19 @@ class BusinessStage:
     confidence: str = "unknown"
     open_questions: list[str] = field(default_factory=list)
     optional: bool = False
+    stage_type: str = "unknown"
+    is_mainline: bool = False
+    is_optional: bool = False
+    capabilities: list[str] = field(default_factory=list)
+    required_fields: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BusinessStage:
+        """Construct from a dict, ignoring unknown keys for backward compatibility."""
+
+        field_names = {f.name for f in dataclasses_fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in field_names}
+        return cls(**filtered)
 
 
 @dataclass(slots=True)

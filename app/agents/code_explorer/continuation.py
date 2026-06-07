@@ -2,7 +2,213 @@
 
 from __future__ import annotations
 
-from app.agents.code_explorer.exploration_state import ExplorationState, StopDecision
+from app.agents.code_explorer.exploration_state import (
+    Evidence,
+    ExplorationState,
+    StopDecision,
+    is_strong_evidence,
+)
+from app.agents.code_explorer.relevance_gate import rank_relevant_candidates
+
+# --- Helper: extract relevance-gate inputs from state ---
+
+
+def _extract_confirmed_symbols(state: ExplorationState) -> list[str]:
+    """Extract symbol names from strong evidence items.
+
+    Reads from: state.evidence_items, state.confirmed_facts,
+    stage.evidence, edge.evidence.
+    """
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    def _process(items: list[Evidence]) -> None:
+        for item in items:
+            if not is_strong_evidence(item):
+                continue
+            sym = item.symbol or item.claim
+            if not sym:
+                continue
+            if sym.startswith("test_") or sym.startswith("should_"):
+                continue
+            if sym not in seen:
+                seen.add(sym)
+                symbols.append(sym)
+
+    _process(state.evidence_items)
+    _process(state.confirmed_facts)
+    for stage in state.stages:
+        _process(stage.evidence)
+    for edge in state.edges:
+        _process(edge.evidence)
+
+    return symbols
+
+
+def _extract_confirmed_paths(state: ExplorationState) -> list[str]:
+    """Extract file paths from strong evidence items.
+
+    Reads from: state.evidence_items, state.confirmed_facts,
+    stage.evidence, edge.evidence.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def _process(items: list[Evidence]) -> None:
+        for item in items:
+            if not is_strong_evidence(item):
+                continue
+            fp = item.file_path
+            if not fp or fp in seen:
+                continue
+            seen.add(fp)
+            paths.append(fp)
+
+    _process(state.evidence_items)
+    _process(state.confirmed_facts)
+    for stage in state.stages:
+        _process(stage.evidence)
+    for edge in state.edges:
+        _process(edge.evidence)
+
+    return paths
+
+
+def _extract_connected_symbols(state: ExplorationState) -> list[str]:
+    """Extract source/target symbols from strong call_edge evidence.
+
+    Reads from: state.evidence_items, state.confirmed_facts,
+    stage.evidence, edge.evidence.
+
+    Also handles "A -> B" or "A \u2192 B" format in evidence.symbol.
+    """
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    def _add_sym(s: str) -> None:
+        if s and s not in seen:
+            seen.add(s)
+            symbols.append(s)
+
+    def _process(item: Evidence) -> None:
+        if not is_strong_evidence(item):
+            return
+        if item.source_type != "call_edge":
+            return
+        # If evidence.symbol is "A -> B" format, extract both
+        if item.symbol and " -> " in item.symbol:
+            for part in item.symbol.split(" -> ", 1):
+                _add_sym(part.strip().split()[0] if part.strip() else "")
+            return
+        if item.symbol and " \u2192 " in item.symbol:
+            for part in item.symbol.split(" \u2192 ", 1):
+                _add_sym(part.strip().split()[0] if part.strip() else "")
+            return
+        # Try to extract source and target from the claim
+        for src in ("source:", "Source:", "caller:", "from:"):
+            if src in item.claim:
+                parts = item.claim.split(src, 1)
+                if len(parts) > 1:
+                    candidate = parts[1].strip().split()[0]
+                    _add_sym(candidate)
+        # Also check summary for " -> " or " → " pattern
+        for sep in (" -> ", " \u2192 "):
+            if sep in item.summary:
+                parts = item.summary.split(sep, 1)
+                for part in parts:
+                    tok = part.strip().split()[0] if part.strip() else ""
+                    _add_sym(tok)
+
+    for item in state.evidence_items:
+        _process(item)
+    for item in state.confirmed_facts:
+        _process(item)
+    for stage in state.stages:
+        for item in stage.evidence:
+            _process(item)
+    for edge in state.edges:
+        for item in edge.evidence:
+            _process(item)
+
+    return symbols
+
+
+def _filter_candidates(
+    state: ExplorationState,
+    limit: int = 10,
+    downgraded_limit: int = 5,
+) -> tuple[list[str], list[str]]:
+    """Filter candidates via relevance gate.
+
+    Returns (prioritized, downgraded) lists.
+    """
+    raw = list(state.candidate_next_actions)
+    if not raw:
+        return [], []
+
+    goal = state.goal
+    confirmed_symbols = _extract_confirmed_symbols(state)
+    confirmed_paths = _extract_confirmed_paths(state)
+    connected_symbols = _extract_connected_symbols(state)
+
+    ranked = rank_relevant_candidates(
+        raw,
+        goal=goal,
+        confirmed_symbols=confirmed_symbols,
+        confirmed_paths=confirmed_paths,
+        connected_symbols=connected_symbols or None,
+        limit=limit,
+    )
+
+    # Downgraded = raw candidates not in ranked
+    ranked_set = set(ranked)
+    downgraded: list[str] = []
+    for c in raw:
+        if c not in ranked_set:
+            downgraded.append(c)
+            if len(downgraded) >= downgraded_limit:
+                break
+
+    return ranked, downgraded
+
+
+def _build_candidate_section(
+    candidates: list[str],
+    heading: str,
+) -> str:
+    """Build a candidate section with optional downgraded note.
+
+    The heading may already include a markdown level (e.g. "### ...").
+    If so we use it as-is; otherwise we prefix with "### ".
+    """
+    if heading.startswith("#"):
+        lines = [heading]
+    else:
+        lines = [f"### {heading}"]
+    if not candidates:
+        lines.append("- 当前无可优先探索的候选方向。")
+        return "\n".join(lines)
+    for c in candidates:
+        lines.append(f"- {c}")
+    return "\n".join(lines)
+
+
+def _build_full_candidate_section(
+    state: ExplorationState,
+    prioritized_heading: str,
+    downgraded_heading: str | None = None,
+) -> str:
+    """Build a full candidate section with prioritized and optional downgraded."""
+    prioritized, downgraded = _filter_candidates(state)
+    result = _build_candidate_section(prioritized, prioritized_heading)
+    if downgraded_heading and downgraded:
+        # Ensure consistent heading format
+        if not downgraded_heading.startswith("#"):
+            downgraded_heading = f"### {downgraded_heading}"
+        result += f"\n\n{downgraded_heading}\n以下候选与当前主线相关性不足，暂不优先探索。\n"
+        for d in downgraded:
+            result += f"- {d}\n"
+    return result
 
 
 def build_continuation_prompt(
@@ -41,8 +247,11 @@ def build_continuation_prompt(
 ### 当前最高优先级断链点
 {_items(decision.blocking_gaps[:3])}
 
-### 候选下一步探索方向
-{_items(state.candidate_next_actions[-12:])}
+{_build_full_candidate_section(
+        state,
+        prioritized_heading="### 优先补齐方向",
+        downgraded_heading="### 已降级候选",
+    )}
 
 不要输出最终报告，请继续使用工具探索。
 不要重复已经成功执行过的完全相同工具调用。
@@ -72,8 +281,13 @@ def build_convergence_checkpoint_prompt(
 ### 当前断链点
 {_items((state.stop_decision.blocking_gaps if state.stop_decision else []) or state.unknowns or state.open_questions)}
 
-### 候选下一步探索方向
-{_items(state.candidate_next_actions[-12:])}
+{_build_full_candidate_section(
+        state,
+        prioritized_heading="### 优先探索方向",
+        downgraded_heading="### 已降级候选",
+    )}
+
+- 如果没有高相关候选，应基于已确认 strong evidence 输出阶段性报告或说明阻塞，而不是继续盲搜。
 """
 
 
@@ -95,8 +309,10 @@ def build_stagnation_report_prompt(
 ### 当前断链点
 {_items((state.stop_decision.blocking_gaps if state.stop_decision else []) or state.unknowns or state.open_questions)}
 
-### 候选下一步探索方向
-{_items(state.candidate_next_actions[-12:])}
+{_build_full_candidate_section(
+        state,
+        prioritized_heading="### 候选下一步探索方向",
+    )}
 """
 
 
@@ -133,8 +349,11 @@ def build_anti_stagnation_prompt(
 ### 以下相邻阶段之间仍然断链
 {_items(decision.missing_edges)}
 
-### 候选下一步探索方向
-{_items(state.candidate_next_actions[-12:])}
+{_build_full_candidate_section(
+        state,
+        prioritized_heading="### 优先探索方向",
+        downgraded_heading="### 已降级候选",
+    )}
 
 请选择不同的工具、不同的符号或更精确的参数补齐最高价值缺口。
 """

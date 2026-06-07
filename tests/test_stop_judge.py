@@ -11,6 +11,7 @@ from app.agents.code_explorer.exploration_state import (
     StageEdge,
 )
 from app.agents.code_explorer.stop_judge import judge_stop, render_evidence_quality_report
+from app.agents.code_explorer.stage_normalizer import normalize_stage_candidates
 
 
 def test_feature_exploration_shallow_three_part_report_cannot_stop() -> None:
@@ -375,6 +376,410 @@ def test_anti_stagnation_prompt_keeps_tools_available_for_unclosed_state() -> No
     assert decision.blocking_gaps[0] in prompt
 
 
+# -- Stage-type-aware stop judge tests --
+
+
+def _strong_evidence() -> Evidence:
+    return Evidence(
+        id="e-strong",
+        claim="strong evidence",
+        source_type="call_edge",
+        summary="strong evidence",
+        confidence="confirmed",
+        strength="strong",
+        can_satisfy_stage_field=True,
+        can_satisfy_stage_edge=True,
+    )
+
+
+def test_supporting_stage_missing_fields_does_not_block() -> None:
+    """Supporting stage with all fields missing should not block CAN_STOP."""
+    strong = _strong_evidence()
+    supporting = BusinessStage(
+        name="持久化写入",
+        stage_type="supporting",
+        is_mainline=False,
+        capabilities=["has_persistence_write"],
+    )
+    main_stage = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main_stage, supporting],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+    assert "持久化写入" not in decision.missing_stage_fields
+
+
+def test_optional_stage_missing_fields_does_not_block() -> None:
+    """Optional stage with missing fields should not block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    optional = BusinessStage(name="可选通知", optional=True)
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, optional],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+    assert "可选通知" not in decision.missing_stage_fields
+
+
+def test_scheduled_job_missing_persistence_state_change_does_not_block() -> None:
+    """Scheduled job stage missing persistence/state_change should not block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    scheduled = BusinessStage(
+        name="定时任务触发",
+        stage_type="scheduled_job",
+        is_mainline=True,
+        capabilities=["has_trigger"],
+        trigger=strong,
+        input=strong,
+        output=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, scheduled],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+
+
+def test_calculation_missing_required_fields_blocks() -> None:
+    """Calculation stage missing input/transform/output should block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    calc = BusinessStage(
+        name="业务计算与转换",
+        stage_type="calculation",
+        is_mainline=True,
+        capabilities=["has_transform"],
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, calc],
+    )
+    decision = judge_stop(state, "")
+    assert not decision.can_stop
+    assert "业务计算与转换" in decision.missing_stage_fields
+
+
+def test_persistence_read_missing_state_change_does_not_block() -> None:
+    """Persistence read stage missing state_change should not block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    pread = BusinessStage(
+        name="可持久化数据读取",
+        stage_type="persistence_read",
+        is_mainline=True,
+        capabilities=["has_persistence_read"],
+        input=strong,
+        persistence=strong,
+        output=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, pread],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+
+
+def test_event_publish_missing_persistence_does_not_block() -> None:
+    """Event publish stage missing persistence should not block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    epub = BusinessStage(
+        name="事件发布与消费",
+        stage_type="event_publish",
+        is_mainline=True,
+        capabilities=["has_event_publish"],
+        trigger=strong,
+        output=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, epub],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+
+
+def test_settlement_creation_missing_persistence_blocks() -> None:
+    """Settlement creation missing persistence should block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    settlement = BusinessStage(
+        name="结算创建",
+        stage_type="settlement_creation",
+        is_mainline=True,
+        trigger=strong,
+        input=strong,
+        transform=strong,
+        output=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, settlement],
+    )
+    decision = judge_stop(state, "")
+    assert not decision.can_stop
+    assert "结算创建" in decision.missing_stage_fields
+
+
+def test_blocking_mainline_missing_required_fields_blocks() -> None:
+    """Blocking mainline stage missing required fields should block CAN_STOP."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    blocking = BusinessStage(
+        name="结算创建",
+        stage_type="settlement_creation",
+        is_mainline=True,
+        trigger=strong,
+        input=strong,
+        transform=strong,
+        # missing output and persistence
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, blocking],
+    )
+    decision = judge_stop(state, "")
+    assert not decision.can_stop
+    assert "结算创建" in decision.missing_stage_fields
+
+
+def test_supporting_evidence_problems_do_not_block() -> None:
+    """Evidence problems in supporting stages should not block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    supporting = BusinessStage(
+        name="持久化写入",
+        stage_type="supporting",
+        is_mainline=False,
+        capabilities=["has_persistence_write"],
+        # No evidence at all
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, supporting],
+    )
+    decision = judge_stop(state, "")
+    # Supporting stage problems should not block
+    assert decision.can_stop
+
+
+def test_blocking_evidence_problems_block() -> None:
+    """Evidence problems in blocking stages should block."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    calc = BusinessStage(
+        name="业务计算与转换",
+        stage_type="calculation",
+        is_mainline=True,
+        capabilities=["has_transform"],
+        evidence=[],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, calc],
+    )
+    decision = judge_stop(state, "")
+    assert not decision.can_stop
+    assert any("业务计算与转换" in p for p in decision.evidence_problems)
+
+
+def test_only_supporting_gaps_allows_stop() -> None:
+    """When only supporting stages have gaps, CAN_STOP should be yes."""
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    supporting = BusinessStage(
+        name="持久化写入",
+        stage_type="supporting",
+        is_mainline=False,
+        capabilities=["has_persistence_write"],
+        evidence=[],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, supporting],
+    )
+    decision = judge_stop(state, "")
+    assert decision.can_stop
+
+
+def test_qualified_stages_do_not_count_supporting() -> None:
+    """Qualified business stages should not include supporting technical stages."""
+    from app.agents.code_explorer.stop_judge import _confirmed_stages
+
+    supporting = BusinessStage(
+        name="持久化写入",
+        stage_type="supporting",
+        is_mainline=False,
+        capabilities=["has_persistence_write"],
+        trigger=_strong_evidence(),
+        input=_strong_evidence(),
+        transform=_strong_evidence(),
+        output=_strong_evidence(),
+        persistence=_strong_evidence(),
+        state_change=_strong_evidence(),
+        evidence=[_strong_evidence()],
+    )
+    main = BusinessStage(
+        name="订单创建",
+        trigger=_strong_evidence(),
+        input=_strong_evidence(),
+        transform=_strong_evidence(),
+        output=_strong_evidence(),
+        persistence=_strong_evidence(),
+        state_change=_strong_evidence(),
+        evidence=[_strong_evidence()],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, supporting],
+    )
+    confirmed = _confirmed_stages(state)
+    assert len(confirmed) == 1
+    assert confirmed[0].name == "订单创建"
+
+
+def test_qualified_edges_do_not_count_supporting_edges() -> None:
+    """Qualified stage edges should not count supporting edges as mainline."""
+    from app.agents.code_explorer.stop_judge import _blocking_edge_count
+
+    strong = _strong_evidence()
+    main = BusinessStage(
+        name="订单创建",
+        trigger=strong, input=strong, transform=strong,
+        output=strong, persistence=strong, state_change=strong,
+        evidence=[strong],
+    )
+    supporting = BusinessStage(
+        name="持久化写入",
+        stage_type="supporting",
+        is_mainline=False,
+        capabilities=["has_persistence_write"],
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[main, supporting],
+        edges=[
+            StageEdge(
+                from_stage="订单创建",
+                to_stage="持久化写入",
+                connection_type="direct_call",
+                evidence=[strong],
+                confidence="confirmed",
+            ),
+        ],
+    )
+    # The edge from main to supporting should not count as mainline qualified
+    count = _blocking_edge_count(state)
+    assert count == 0
+
+
+def test_stage_normalizer_supporting_stages_not_counted_in_qualified() -> None:
+    """Stages normalized by StageNormalizer should not count as qualified."""
+    from app.agents.code_explorer.stop_judge import _confirmed_stages
+
+    stages = normalize_stage_candidates([_strong_evidence()])
+    main = BusinessStage(
+        name="订单创建",
+        trigger=_strong_evidence(),
+        input=_strong_evidence(),
+        transform=_strong_evidence(),
+        output=_strong_evidence(),
+        persistence=_strong_evidence(),
+        state_change=_strong_evidence(),
+        evidence=[_strong_evidence()],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=stages + [main],
+    )
+    confirmed = _confirmed_stages(state)
+     # Only the manually created main stage should be counted
+    assert len(confirmed) == 1
+
+
 def _closed_state() -> ExplorationState:
     evidence = _evidence("confirmed")
     first = BusinessStage(
@@ -454,6 +859,133 @@ def _evidence(claim: str) -> Evidence:
         can_satisfy_stage_field=True,
         can_satisfy_stage_edge=True,
         reason="Explicit strong fixture evidence.",
+    )
+
+
+# -- _main_chain_reaches_persistence tightened single-stage early return tests --
+
+
+def test_controller_or_rpc_single_stage_with_repository_read_should_not_early_return() -> None:
+    """controller_or_rpc stage with only trigger + repository read persistence
+    should NOT be considered as main chain reaching persistence via single-stage
+    early return."""
+    trigger = _strong_evidence()
+    # repository read evidence: has can_satisfy_stage_field but indicates read only
+    read_evidence = Evidence(
+        id="e-repo-read",
+        claim="Found repository read in WidgetRepository.findById()",
+        source_type="repository",
+        summary="repository read from WidgetRepository",
+        confidence="confirmed",
+        strength="strong",
+        can_satisfy_stage_field=True,
+        can_satisfy_stage_edge=False,
+        reason="Repository read operation detected.",
+    )
+    controller = BusinessStage(
+        name="RPC入口",
+        stage_type="controller_or_rpc",
+        is_mainline=True,
+        capabilities=["has_controller"],
+        trigger=trigger,
+        persistence=read_evidence,
+        evidence=[trigger, read_evidence],
+    )
+    state = ExplorationState(
+        goal="explore RPC flow",
+        task_mode="feature_exploration",
+        stages=[controller],
+    )
+
+    from app.agents.code_explorer.stop_judge import _main_chain_reaches_persistence
+
+    assert not _main_chain_reaches_persistence([controller], state)
+
+
+def test_settlement_creation_single_stage_with_full_fields_should_early_return() -> None:
+    """settlement_creation stage with trigger + input + transform + output + persistence_write
+    should be considered as main chain reaching persistence via single-stage early return."""
+    strong = _strong_evidence()
+    settlement = BusinessStage(
+        name="结算创建",
+        stage_type="settlement_creation",
+        is_mainline=True,
+        capabilities=["has_persistence_write"],
+        trigger=strong,
+        input=strong,
+        transform=strong,
+        output=strong,
+        persistence=strong,
+        evidence=[strong],
+    )
+    state = ExplorationState(
+        goal="explore settlement flow",
+        task_mode="feature_exploration",
+        stages=[settlement],
+    )
+
+    from app.agents.code_explorer.stop_judge import _main_chain_reaches_persistence
+
+    assert _main_chain_reaches_persistence([settlement], state)
+
+
+def test_main_chain_reaches_persistence_bfs_through_edges() -> None:
+    """When no single stage has both trigger and persistence, BFS over edges
+    should still detect reachability from trigger stage to persistence stage."""
+    trigger = _strong_evidence()
+    transform_ev = _strong_evidence()
+    persistence_ev = _strong_evidence()
+
+    trigger_stage = BusinessStage(
+        name="入口触发",
+        stage_type="entry",
+        is_mainline=True,
+        capabilities=["has_trigger"],
+        trigger=trigger,
+        evidence=[trigger],
+    )
+    transform_stage = BusinessStage(
+        name="业务计算",
+        stage_type="calculation",
+        is_mainline=True,
+        capabilities=["has_transform"],
+        transform=transform_ev,
+        evidence=[transform_ev],
+    )
+    persist_stage = BusinessStage(
+        name="持久化写入",
+        stage_type="persistence_write",
+        is_mainline=True,
+        capabilities=["has_persistence_write"],
+        persistence=persistence_ev,
+        evidence=[persistence_ev],
+    )
+    state = ExplorationState(
+        goal="explore flow",
+        task_mode="feature_exploration",
+        stages=[trigger_stage, transform_stage, persist_stage],
+        edges=[
+            StageEdge(
+                from_stage="入口触发",
+                to_stage="业务计算",
+                connection_type="direct_call",
+                evidence=[trigger],
+                confidence="confirmed",
+            ),
+            StageEdge(
+                from_stage="业务计算",
+                to_stage="持久化写入",
+                connection_type="direct_call",
+                evidence=[transform_ev],
+                confidence="confirmed",
+            ),
+        ],
+    )
+
+    from app.agents.code_explorer.stop_judge import _main_chain_reaches_persistence
+
+    assert _main_chain_reaches_persistence(
+        [trigger_stage, transform_stage, persist_stage], state
     )
 
 

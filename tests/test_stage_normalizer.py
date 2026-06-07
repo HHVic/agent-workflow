@@ -1,3 +1,5 @@
+"""Tests for stage_normalizer supporting stage classification."""
+
 from app.agents.code_explorer.exploration_state import Evidence
 from app.agents.code_explorer.stage_normalizer import (
     merge_normalized_stages,
@@ -20,6 +22,87 @@ def _evidence(symbol: str, source_type: str = "tool_result") -> Evidence:
         can_satisfy_stage_edge=True,
         reason="Explicit strong fixture evidence.",
     )
+
+
+def test_persistence_write_is_supporting() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetRepository.save")])
+    stage = next(s for s in stages if s.name == "持久化写入")
+    assert stage.stage_type == "supporting"
+
+
+def test_persistence_write_is_not_mainline() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetRepository.save")])
+    stage = next(s for s in stages if s.name == "持久化写入")
+    assert stage.is_mainline is False
+
+
+def test_persistence_write_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetRepository.save")])
+    stage = next(s for s in stages if s.name == "持久化写入")
+    assert "has_persistence_write" in stage.capabilities
+
+
+def test_persistence_read_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("UserService.findByUser")])
+    stage = next(s for s in stages if s.name == "可持久化数据读取")
+    assert "has_persistence_read" in stage.capabilities
+
+
+def test_state_transition_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetStatus.updateStatus")])
+    stage = next(s for s in stages if s.name == "状态流转")
+    assert "has_state_change" in stage.capabilities
+
+
+def test_event_publish_consume_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetEvent.publishEvent")])
+    stage = next(s for s in stages if s.name == "事件发布与消费")
+    assert "has_event_publish" in stage.capabilities or "has_event_consume" in stage.capabilities
+
+
+def test_entry_trigger_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetGrpcDelegate.execute")])
+    stage = next(s for s in stages if s.name == "入口触发")
+    assert "has_trigger" in stage.capabilities
+
+
+def test_scheduled_job_trigger_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("SchedulerService.doRun")])
+    stage = next(s for s in stages if s.name == "定时任务触发")
+    assert "has_trigger" in stage.capabilities
+
+
+def test_business_calculation_capabilities() -> None:
+    stages = normalize_stage_candidates([_evidence("WidgetService.calculateAmount")])
+    stage = next(s for s in stages if s.name == "业务计算与转换")
+    assert "has_transform" in stage.capabilities
+
+
+def test_specific_business_stage_not_marked_as_supporting() -> None:
+    """A specific business stage name like '订单创建' should NOT be auto-marked as supporting."""
+    evidence = Evidence(
+        id="e-order",
+        claim="订单创建订单流程",
+        source_type="tool_result",
+        symbol="OrderService.createOrder",
+        file_path="src/main/java/example/OrderService.java:10",
+        summary="订单创建 OrderService.createOrder",
+        confidence="confirmed",
+        strength="strong",
+        can_satisfy_stage_field=True,
+        can_satisfy_stage_edge=True,
+    )
+    stages = normalize_stage_candidates([evidence])
+    # "OrderService.createOrder" maps to "待确认阶段：OrderService.createOrder"
+    # because it doesn't match any _CATEGORY_MARKERS
+    assert not any(
+        s.stage_type == "supporting"
+        for s in stages
+        if "订单" in s.name or "order" in s.name.lower()
+    )
+
+
+# -- Existing tests to ensure backward compatibility --
 
 
 def test_normalizes_methods_into_generic_business_stages() -> None:
@@ -94,4 +177,5 @@ def test_strong_evidence_promotes_matching_weak_candidate_to_main_stage() -> Non
 
     assert stages[0].name == "状态流转"
     assert stages[0].confidence == "confirmed"
+    assert stages[0].stage_type == "supporting"
     assert not stages[0].optional
